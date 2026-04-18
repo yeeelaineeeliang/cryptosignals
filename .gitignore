@@ -35,3 +35,6 @@ apps/worker/artifacts/
 # IDE
 .vscode/
 .idea/
+
+# personal notes — kept local
+PHASE2_REPORT.md
