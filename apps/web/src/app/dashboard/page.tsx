@@ -26,16 +26,12 @@ async function DashboardData() {
   return (
     <div className="space-y-8">
       <IntroBanner />
-      <section className="space-y-3">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-white/50">
-          Live prices
-        </h2>
+      <section className="space-y-4">
+        <h2 className="text-base font-semibold text-white/70">Live prices</h2>
         <PriceTickerGrid pairs={pairs} initialPrices={prices} />
       </section>
-      <section className="space-y-3">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-white/50">
-          Model calls (updates every 30 seconds)
-        </h2>
+      <section className="space-y-4">
+        <h2 className="text-base font-semibold text-white/70">Model calls</h2>
         <SignalsPanel pairs={pairs} initialPredictions={predictions} />
       </section>
     </div>
