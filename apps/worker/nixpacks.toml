@@ -1,0 +1,14 @@
+# Explicit Railway/nixpacks build config for the Python worker.
+# Uses `uv sync --frozen` (fast, reproducible from uv.lock) and runs the
+# package via `uv run` which activates the venv automatically.
+
+[phases.setup]
+nixPkgs = ["python312", "uv"]
+
+[phases.install]
+cmds = [
+  "uv sync --frozen --no-dev"
+]
+
+[start]
+cmd = "uv run python -m worker.main"
