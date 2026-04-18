@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from .coinbase import CoinbaseClient
 from .config import Settings
 from .http_client import make_http_client
+from .inference import infer_and_record
 from .ingest import ingest_candles, poll_prices
 from .logging_setup import get_logger, setup_logging
 from .scheduler import add_interval
@@ -47,6 +48,9 @@ async def run() -> None:
     async def _ingest_candles() -> None:
         await ingest_candles(cb, sb, settings)
 
+    async def _infer_and_record() -> None:
+        await infer_and_record(sb, settings)
+
     add_interval(
         scheduler,
         "poll_prices",
@@ -59,9 +63,15 @@ async def run() -> None:
         _ingest_candles,
         seconds=settings.candle_interval_seconds,
     )
+    add_interval(
+        scheduler,
+        "infer_and_record",
+        _infer_and_record,
+        seconds=settings.inference_interval_seconds,
+    )
 
-    # Phase 2+ jobs get registered here (compute_features, infer_and_trade,
-    # evaluate_models, refit_models). Add them as they're built.
+    # Phase 3+ jobs get registered here (trading engine, evaluate_models,
+    # refit_models). Add them as they're built.
 
     scheduler.start()
     log.info("scheduler_started", jobs=[j.id for j in scheduler.get_jobs()])

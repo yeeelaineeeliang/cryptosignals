@@ -92,7 +92,7 @@ def load_active(
             "feature_set": feature_set,
             "is_active": True,
         })
-        .maybeSingle()
+        .maybe_single()
         .execute()
     )
     return res.data if res and res.data else None
