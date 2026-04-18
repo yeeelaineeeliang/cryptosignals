@@ -27,3 +27,14 @@ dev = [
 
 [tool.uv]
 package = false
+
+# Safety net: if any builder (nixpacks, etc.) falls back to `pip install .`,
+# tell setuptools we have NO packages to ship. Dependencies from [project]
+# still install; no wheel-building of our own code is attempted.
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
+packages = []
