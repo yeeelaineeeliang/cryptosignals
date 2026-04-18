@@ -62,6 +62,24 @@ export function formatLogretPct(value: number | null | undefined): string {
 }
 
 /**
+ * Predicted dollar impact of holding `notional` USD through one prediction.
+ * Log-returns ≈ percentage returns for small moves, so this is `notional × r`.
+ * Returns a string like "+$1.40" or "−$0.65" or "—".
+ */
+export function formatDollarImpact(
+  predictedLogret: number | null | undefined,
+  notionalUsd = 10_000,
+): string {
+  if (predictedLogret == null || !Number.isFinite(predictedLogret)) return "—";
+  const dollars = notionalUsd * predictedLogret;
+  const abs = Math.abs(dollars);
+  const sign = dollars > 0 ? "+" : dollars < 0 ? "−" : "";
+  if (abs < 0.01) return `${sign}$${abs.toFixed(3)}`;
+  if (abs < 1) return `${sign}$${abs.toFixed(2)}`;
+  return `${sign}$${abs.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+}
+
+/**
  * Translate a SHORT/LONG/HOLD signal into a non-finance label + arrow + tone.
  * For a user who has never traded, "LONG" is meaningless — "Buy" is not.
  */

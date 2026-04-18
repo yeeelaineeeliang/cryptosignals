@@ -1,5 +1,6 @@
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 import { ModelCard } from "@/components/model/ModelCard";
+import { PipelineDiagram } from "@/components/model/PipelineDiagram";
 import type { ModelVersion } from "@crypto-signals/shared";
 
 export const dynamic = "force-dynamic";
@@ -23,6 +24,8 @@ export default async function ModelPage() {
           The math behind every call. No black boxes.
         </p>
       </header>
+
+      <PipelineDiagram />
 
       {models.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 p-10 text-center text-white/50">
