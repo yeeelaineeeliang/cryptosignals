@@ -1,6 +1,49 @@
 # Phase 2 — Live OLS Trading Signal: Methodology, Architecture, Results
 
-> **One-line pitch**: I took my 2024 OLS crypto research project — which lived as backtest-only Jupyter notebooks — and put it on rails. Phase 2 turns it into a live system: a Python worker on Railway pulls Coinbase data every minute, regenerates ~37 engineered features each tick, runs an OLS model trained with iterative VIF elimination, and writes a prediction every 30 seconds. The Next.js dashboard subscribes to predictions via Supabase Realtime and shows them as they arrive. Every coefficient and every elimination step is exposed on the `/model` page — there are no black boxes.
+## What this project is — for humans, not engineers
+
+**Crypto Signals is a live, transparent dashboard that watches Bitcoin and Ethereum prices in real time, runs a statistical model on every new bar, and tells you what the data thinks the next 5 minutes will look like — up, down, or unclear — and shows every line of math behind that opinion.** You sign up, pick which coins to watch, set a paper-trading budget, and watch a simulated portfolio grow or shrink based on the model's calls. No real money is ever at risk; nothing is locked behind a paywall; nothing is opaque.
+
+### The problem it addresses
+
+Anyone who has ever opened a crypto exchange app knows the feeling: green numbers, red numbers, a chart, a buy button — and zero help making the call. The two most common ways people resolve this end badly:
+
+1. **Vibes-based trading**: scroll Twitter, see a confident take, buy or sell on instinct. Most retail traders lose money this way; the data is overwhelming.
+2. **Paid black-box "AI" tools**: subscribe to something promising signals from a "proprietary algorithm." You see a buy/sell arrow but no reasoning. When the model is wrong (and it will be) you have no way to know whether to trust the next signal.
+
+Both fail for the same reason: **the trader can't see the model's reasoning, so they can't calibrate trust.** When the signal works they over-trust; when it fails they over-distrust. Either way they're flying blind.
+
+### What Crypto Signals does differently
+
+Three things, in plain English:
+
+1. **It shows you the model's actual prediction in real time** — "BTC predicted to move +2.3 bps in the next 5 minutes, signal: LONG" — updated every 30 seconds without you refreshing.
+2. **It exposes every coefficient and every assumption.** The `/model` page lists exactly which 15 features the model uses, what each one's weight is, and which features it considered but rejected (and why). You can read the math the same way you'd read a recipe.
+3. **It lets you paper-trade** — run a simulated portfolio for weeks against live signals, with no money at risk, to find out whether following the model would actually have made money before deciding whether to trust it with real capital.
+
+### Who could actually use this
+
+Three real personas:
+
+- **A grad student who wants to learn ML in a domain they care about.** Read the `/model` page during your morning coffee, watch the coefficients drift over weeks, see how a model trained on one regime degrades when the market shifts. This is what a quant analyst does day one on the job.
+- **A retail crypto holder considering becoming an active trader.** Run the paper portfolio for a month before risking real money. If the simulated equity curve is flat or down, the model has no edge and you've saved yourself a real loss. If it's up, you've learned what the model's good and bad market conditions look like.
+- **An interview candidate.** Show this dashboard to a fintech / data science interviewer and walk through how it works. The system demonstrates: production ML deployment, real-time infrastructure, honest reporting of negative results, and the gap between research and live performance — all things hiring managers probe for.
+
+### How it actually helps you
+
+- **Calibrate trust through transparency.** When a "buy" signal fires, you can see: this came from coefficients trained on N days of history, the model has a 53% hit rate on similar setups historically, and right now the magnitude is small (so it's a weak signal, not a strong one). That's actionable. A paid black-box tool can't give you any of that.
+- **Learn without losing money.** Paper trading turns "should I have bought BTC last week?" from a regret loop into a reproducible experiment. You can test ten strategies in a month for free.
+- **Build a real portfolio piece.** The codebase is fully open at github.com/yeeelaineeeliang/cryptosignals. Contribute a feature, fork it for your own asset class, or use it as a reference for how to deploy a multi-service ML system.
+
+### What it's NOT
+
+To be clear, because regulators care: this is **not** a brokerage, **not** investment advice, **not** affiliated with Coinbase, and **not** a tool that will make you money. The disclaimer renders on every page. It is an educational tool — like a flight simulator for trading. The point is to understand the system, not to print free money.
+
+---
+
+## How it works — the technical pitch
+
+> I took my 2024 OLS crypto research project — which lived as backtest-only Jupyter notebooks — and put it on rails. Phase 2 turns it into a live system: a Python worker on Railway pulls Coinbase data every minute, regenerates ~37 engineered features each tick, runs an OLS model trained with iterative VIF elimination, and writes a prediction every 30 seconds. The Next.js dashboard subscribes to predictions via Supabase Realtime and shows them as they arrive. Every coefficient and every elimination step is exposed on the `/model` page — there are no black boxes.
 
 ---
 
