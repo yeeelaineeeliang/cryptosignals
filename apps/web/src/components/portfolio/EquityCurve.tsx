@@ -34,20 +34,33 @@ function buildCurve(trades: PaperTrade[], portfolio: Portfolio | null): DataPoin
 
   const points: DataPoint[] = [{ time: "Start", equity: start }];
   let cash = start;
+  // Track qty per symbol so we can value positions at each trade's price
+  const positions: Record<string, { qty: number; lastPrice: number }> = {};
 
   for (const t of sorted) {
+    const sym = t.symbol;
+    if (!positions[sym]) positions[sym] = { qty: 0, lastPrice: t.price };
+
     if (t.side === "BUY") {
       cash -= t.notional_usd + t.fee_usd;
+      positions[sym].qty += t.qty;
     } else {
       cash += t.notional_usd - t.fee_usd;
+      positions[sym].qty = Math.max(0, positions[sym].qty - t.qty);
     }
+    positions[sym].lastPrice = t.price;
+
+    // Equity = cash + sum of all open position values at current trade prices
+    const posValue = Object.values(positions).reduce(
+      (sum, p) => sum + p.qty * p.lastPrice,
+      0
+    );
+
     const label = new Date(t.created_at).toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
     });
-    // Use cash as equity proxy at trade time (positions valued at trade price)
-    const positionValue = t.side === "BUY" ? t.notional_usd : 0;
-    points.push({ time: label, equity: cash + positionValue });
+    points.push({ time: label, equity: cash + posValue });
   }
 
   // Append current live equity
