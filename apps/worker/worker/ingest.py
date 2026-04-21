@@ -1,7 +1,8 @@
-"""Data ingestion jobs.
+"""Data ingestion jobs: prices, candles, and feature computation.
 
-Phase 1: poll_prices only.
-Phase 2 will add ingest_candles and compute_features.
+Each job is wrapped in broad try/except and logs errors but doesn't raise, so
+APScheduler continues ticking even after a transient Coinbase/Supabase hiccup.
+Writes go through the service-role client and bypass RLS by design.
 """
 from __future__ import annotations
 
@@ -42,3 +43,44 @@ async def poll_prices(cb: CoinbaseClient, sb: Client, settings: Settings) -> Non
             record_error(sb, str(e))
         except Exception:
             log.exception("heartbeat_write_failed")
+
+
+async def ingest_candles(cb: CoinbaseClient, sb: Client, settings: Settings) -> None:
+    """Pull recent OHLCV bars for each watched pair; UPSERT into `candles`.
+
+    Coinbase returns ~300 recent bars per request; we simply upsert them all.
+    The PRIMARY KEY (symbol, granularity, bucket_start) makes this idempotent,
+    so repeated calls silently refresh the still-open bar and re-confirm closed
+    bars without duplicating rows.
+
+    `trade_count` is left NULL for now — Coinbase's /trades endpoint doesn't
+    expose a time-filtered aggregate, so reconstructing bar-level counts is
+    expensive. Features that depend on it are excluded from the v1 feature set;
+    see docs/VIF.md.
+    """
+    try:
+        for symbol in settings.pairs:
+            bars = await cb.candles(symbol, settings.candle_granularity)
+            if not bars:
+                continue
+            rows = [
+                {
+                    "symbol": bar.symbol,
+                    "bucket_start": bar.bucket_start.isoformat(),
+                    "granularity": bar.granularity,
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                    "trade_count": None,
+                }
+                for bar in bars
+            ]
+            sb.table("candles").upsert(
+                rows,
+                on_conflict="symbol,granularity,bucket_start",
+            ).execute()
+            log.debug("candles_upserted", symbol=symbol, n=len(rows))
+    except Exception as e:  # noqa: BLE001
+        log.exception("ingest_candles_failed", error=str(e))

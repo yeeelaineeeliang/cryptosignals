@@ -1,21 +1,41 @@
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 import { PriceTickerGrid } from "@/components/dashboard/PriceTickerGrid";
-import type { Pair, Price } from "@crypto-signals/shared";
+import { SignalsPanel } from "@/components/dashboard/SignalsPanel";
+import { IntroBanner } from "@/components/dashboard/IntroBanner";
+import type { Pair, Prediction, Price } from "@crypto-signals/shared";
 
 export const dynamic = "force-dynamic";
 
 async function DashboardData() {
   const supabase = createPublicSupabaseClient();
 
-  const [pairsRes, pricesRes] = await Promise.all([
+  const [pairsRes, pricesRes, predictionsRes] = await Promise.all([
     supabase.from("pairs").select("*").eq("is_active", true).order("display_name"),
     supabase.from("prices").select("*"),
+    supabase
+      .from("predictions")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(50),
   ]);
 
   const pairs = (pairsRes.data ?? []) as Pair[];
   const prices = (pricesRes.data ?? []) as Price[];
+  const predictions = (predictionsRes.data ?? []) as Prediction[];
 
-  return <PriceTickerGrid pairs={pairs} initialPrices={prices} />;
+  return (
+    <div className="space-y-8">
+      <IntroBanner />
+      <section className="space-y-4">
+        <h2 className="text-base font-semibold text-white/70">Live prices</h2>
+        <PriceTickerGrid pairs={pairs} initialPrices={prices} />
+      </section>
+      <section className="space-y-4">
+        <h2 className="text-base font-semibold text-white/70">Model calls</h2>
+        <SignalsPanel pairs={pairs} initialPredictions={predictions} />
+      </section>
+    </div>
+  );
 }
 
 export default async function DashboardPage() {
