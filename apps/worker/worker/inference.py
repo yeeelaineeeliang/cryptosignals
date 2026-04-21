@@ -8,10 +8,7 @@ is:
                     -> intercept + dot(coefs, standardized)
                     -> signal = LONG / SHORT / HOLD
                     -> INSERT predictions row
-
-Paper trading (executing simulated trades per user based on signals) is not
-in this Phase 2 scope — it's Phase 3. For now we just persist signals; the
-dashboard subscribes to `predictions` via Realtime to show them live.
+                    -> execute_paper_trades (Phase 3)
 """
 from __future__ import annotations
 
@@ -24,6 +21,7 @@ from .config import Settings
 from .features import FEATURE_COLUMNS, build_features
 from .logging_setup import get_logger
 from .ml.persistence import load_active
+from .trading import execute_paper_trades
 
 log = get_logger(__name__)
 
@@ -128,13 +126,18 @@ async def infer_and_record(sb: Client, settings: Settings) -> None:
             price = _current_price(sb, symbol) or float(latest["f_close"])
             signal = _signal_for(prediction)
 
-            sb.table("predictions").insert({
+            insert_res = sb.table("predictions").insert({
                 "symbol": symbol,
                 "model_version_id": model["id"],
                 "current_price": price,
                 "predicted_logret": prediction,
                 "signal": signal,
             }).execute()
+
+            # Phase 3: execute paper trades for eligible users
+            if insert_res.data:
+                pred_row = insert_res.data[0]
+                await execute_paper_trades(sb, pred_row, settings)
 
             log.info(
                 "predicted",

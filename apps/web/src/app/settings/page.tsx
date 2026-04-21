@@ -1,5 +1,7 @@
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 import { PairPicker } from "@/components/settings/PairPicker";
+import { ThresholdSlider } from "@/components/settings/ThresholdSlider";
+import { CapitalForm } from "@/components/settings/CapitalForm";
 import type { Pair } from "@crypto-signals/shared";
 
 export const dynamic = "force-dynamic";
@@ -23,8 +25,8 @@ export default async function SettingsPage() {
       </div>
 
       <PairPicker pairs={pairs} />
-
-      {/* Phase 3 adds ThresholdSlider, CapitalForm. */}
+      <ThresholdSlider />
+      <CapitalForm />
     </div>
   );
 }
