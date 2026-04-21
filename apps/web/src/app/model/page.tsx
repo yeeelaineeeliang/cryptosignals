@@ -1,18 +1,31 @@
 import { createPublicSupabaseClient } from "@/lib/supabase/server";
 import { ModelCard } from "@/components/model/ModelCard";
 import { PipelineDiagram } from "@/components/model/PipelineDiagram";
-import type { ModelVersion } from "@crypto-signals/shared";
+import { LivePerformancePanel } from "@/components/model/LivePerformancePanel";
+import type { ModelPerformance, ModelVersion } from "@crypto-signals/shared";
 
 export const dynamic = "force-dynamic";
 
 export default async function ModelPage() {
   const supabase = createPublicSupabaseClient();
-  const { data } = await supabase
-    .from("model_versions")
-    .select("*")
-    .eq("is_active", true)
-    .order("symbol");
-  const models = (data ?? []) as ModelVersion[];
+
+  const [modelsRes, perfRes] = await Promise.all([
+    supabase.from("model_versions").select("*").eq("is_active", true).order("symbol"),
+    supabase
+      .from("model_performance")
+      .select("*")
+      .order("evaluated_at", { ascending: false })
+      .limit(20),
+  ]);
+
+  const models = (modelsRes.data ?? []) as ModelVersion[];
+  const perfs = (perfRes.data ?? []) as ModelPerformance[];
+
+  // Latest performance per model_version_id
+  const latestPerf = new Map<number, ModelPerformance>();
+  for (const p of perfs) {
+    if (!latestPerf.has(p.model_version_id)) latestPerf.set(p.model_version_id, p);
+  }
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-10 space-y-8">
@@ -32,7 +45,15 @@ export default async function ModelPage() {
           No active models yet.
         </div>
       ) : (
-        models.map((model) => <ModelCard key={model.id} model={model} />)
+        models.map((model) => (
+          <div key={model.id} className="space-y-4">
+            <ModelCard model={model} />
+            <LivePerformancePanel
+              model={model}
+              perf={latestPerf.get(model.id) ?? null}
+            />
+          </div>
+        ))
       )}
     </div>
   );
