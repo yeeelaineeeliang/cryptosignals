@@ -145,8 +145,8 @@ def build_features(candles: pd.DataFrame) -> pd.DataFrame:
     df["f_logret_lag_3"] = df["f_logret"].shift(3)
     df["f_logret_lag_12"] = df["f_logret"].shift(12)
 
-    # ---- Target: log-return of the NEXT bar -------------------------------
-    df["target_logret"] = np.log(close.shift(-1) / close)
+    # ---- Target: 15-minute (3-bar) cumulative log-return ------------------
+    df["target_logret"] = np.log(close.shift(-3) / close)
 
     # Return only the cols we care about, in a stable order
     out_cols = ["bucket_start", *FEATURE_COLUMNS, "target_logret"]

@@ -1,8 +1,8 @@
 """One-time bootstrap training script — the pedagogical VIF walkthrough.
 
 Run this ONCE before first deploy (and any time you want a fresh model from
-scratch). It pulls candles from Supabase, computes features, runs OLS with
-iterative VIF elimination, prints the full trace, saves artifacts under
+scratch). It pulls candles from Supabase, computes features, runs logistic
+regression with iterative VIF elimination, prints the full trace, saves artifacts under
 ``artifacts/``, and inserts a new row into ``model_versions`` marked
 ``is_active = TRUE`` so the live inference loop can pick it up.
 
@@ -110,9 +110,9 @@ def write_artifacts(symbol: str, features_df: pd.DataFrame, model, window_start,
         f.write(f"- features surviving VIF: **{len(model.selected_features)}** ")
         f.write(f"(started with {len(FEATURE_COLUMNS)})\n\n")
         f.write("## Test-set metrics\n\n")
-        f.write(f"- train R² (on train+val): `{model.metrics.r2:.4f}`\n")
-        f.write(f"- OSR² on test: `{model.metrics.osr2:.4f}`\n")
-        f.write(f"- RMSE on test: `{model.metrics.rmse:.6f}`\n")
+        f.write(f"- train+val accuracy: `{model.metrics.r2:.4f}`\n")
+        f.write(f"- test accuracy: `{model.metrics.osr2:.4f}`\n")
+        f.write(f"- test log-loss: `{model.metrics.rmse:.6f}`\n")
         f.write(f"- direction hit rate on test: `{model.metrics.hit_rate:.4f}` ")
         f.write(f"({model.metrics.tp}+{model.metrics.tn}={model.metrics.tp + model.metrics.tn}")
         f.write(f" correct / {model.metrics.n} total)\n\n")

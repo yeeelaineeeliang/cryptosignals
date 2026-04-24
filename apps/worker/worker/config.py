@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     enable_paper_trading: bool = True
     enable_llm_features: bool = False
 
+    # Prediction horizon (bars ahead the model targets)
+    prediction_bars_ahead: int = 3        # 3 × 5min = 15-min cumulative return
+
     # Optimization loop
     optimize_interval_minutes: int = 60   # runs after every evaluate cycle
 

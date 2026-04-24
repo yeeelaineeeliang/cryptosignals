@@ -1,4 +1,4 @@
-"""The shared training pipeline: OLS + iterative VIF elimination.
+"""The shared training pipeline: logistic regression + iterative VIF elimination.
 
 Called by BOTH the one-time bootstrap script and the periodic refit job. Same
 inputs in, same outputs out — the only difference is the training window.
@@ -7,29 +7,35 @@ VIF elimination rules (see docs/VIF.md for the pedagogical walkthrough):
 
 1. Fit standardizer on train fold only. Transform val/test with train stats.
 2. Compute VIF on the standardized training feature matrix (with an intercept).
-3. Fit OLS and record metrics on val.
+3. Fit logistic regression and record val accuracy.
 4. Decision:
      max VIF > 10         -> drop unconditionally
-     5 < max VIF <= 10    -> drop only if val OSR² does not degrade by > 0.005
+     5 < max VIF <= 10    -> drop only if val accuracy does not degrade by > 0.005
      max VIF <= 5         -> STOP
-5. Also stop when any further drop would cost > 0.01 val OSR² or < 3 features remain.
+5. Also stop when any further drop would cost > 0.01 val accuracy or < 3 features remain.
+
+Coefficients are stored in the same JSONB format as before. Inference uses
+sign(intercept + X @ coefs) to determine direction — the dot product now
+produces log-odds instead of a predicted log-return, but the sign semantics
+are identical: positive = LONG, negative = SHORT.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import log_loss as _log_loss
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
-from .metrics import BacktestMetrics, direction_confusion, full_backtest
+from .metrics import BacktestMetrics, direction_confusion
 
 VIF_DROP_HARD = 10.0
 VIF_DROP_SOFT = 5.0
-SOFT_OSR2_TOLERANCE = 0.005
-HARD_OSR2_TOLERANCE = 0.01
+SOFT_OSR2_TOLERANCE = 0.005   # max val-accuracy drop allowed in the soft zone
+HARD_OSR2_TOLERANCE = 0.01    # hard stop: costs more than this → don't drop
 MIN_FEATURES = 3
 
 
@@ -49,10 +55,10 @@ class TrainedModel:
 class _IterState:
     features: list[str]
     vif: dict[str, float]
-    r2: float
-    osr2: float
-    hit_rate: float
-    rmse: float
+    r2: float        # train accuracy
+    osr2: float      # val accuracy (used for VIF drop decisions)
+    hit_rate: float  # val directional accuracy (same as osr2 here)
+    rmse: float      # val log-loss
     intercept: float
     coefs: dict[str, float]
 
@@ -72,24 +78,30 @@ def _compute_vif(x: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def _fit_ols(
+def _fit_logistic(
     x_train: pd.DataFrame, y_train: pd.Series,
     x_val: pd.DataFrame, y_val: pd.Series,
 ) -> _IterState:
-    model = sm.OLS(y_train, sm.add_constant(x_train, has_constant="add")).fit()
-    y_pred_val = model.predict(sm.add_constant(x_val, has_constant="add"))
-    metrics = full_backtest(y_train, y_val, y_pred_val, r2_train=float(model.rsquared))
-    params = model.params
-    intercept = float(params.get("const", 0.0))
-    coefs = {col: float(params[col]) for col in x_train.columns if col in params}
+    y_tr = (y_train > 0).astype(int)
+    y_vl = (y_val > 0).astype(int)
+
+    model = LogisticRegression(C=1.0, max_iter=1000, random_state=42)
+    model.fit(x_train, y_tr)
+
     vif = _compute_vif(x_train)
+    intercept = float(model.intercept_[0])
+    coefs = {col: float(c) for col, c in zip(x_train.columns, model.coef_[0])}
+    train_acc = float(model.score(x_train, y_tr))
+    val_acc = float(model.score(x_val, y_vl))
+    val_loss = float(_log_loss(y_vl, model.predict_proba(x_val)))
+
     return _IterState(
         features=list(x_train.columns),
         vif=vif,
-        r2=float(model.rsquared),
-        osr2=metrics.osr2,
-        hit_rate=metrics.hit_rate,
-        rmse=metrics.rmse,
+        r2=train_acc,
+        osr2=val_acc,
+        hit_rate=val_acc,
+        rmse=val_loss,
         intercept=intercept,
         coefs=coefs,
     )
@@ -134,25 +146,25 @@ def _step_drop(
 
     if max_vif > vif_hard:
         kept = [c for c in features if c != worst]
-        new_state = _fit_ols(x_train[kept], y_train, x_val[kept], y_val)
+        new_state = _fit_logistic(x_train[kept], y_train, x_val[kept], y_val)
         if verbose:
             print(f"  -> dropping {worst} (VIF {max_vif:.2f} > {vif_hard})")
         return worst, new_state
 
-    # Soft zone: vif_soft < VIF <= vif_hard. Check OSR² would not degrade too much.
+    # Soft zone: vif_soft < VIF <= vif_hard. Check val accuracy would not degrade too much.
     kept = [c for c in features if c != worst]
-    candidate = _fit_ols(x_train[kept], y_train, x_val[kept], y_val)
+    candidate = _fit_logistic(x_train[kept], y_train, x_val[kept], y_val)
     degradation = current.osr2 - candidate.osr2
     if degradation <= soft_osr2_tolerance:
         if verbose:
-            print(f"  -> dropping {worst} (VIF {max_vif:.2f}, OSR² change {-degradation:+.4f})")
+            print(f"  -> dropping {worst} (VIF {max_vif:.2f}, val_acc change {-degradation:+.4f})")
         return worst, candidate
     if degradation > HARD_OSR2_TOLERANCE:
         if verbose:
-            print(f"  -> stopping: dropping {worst} would cost {degradation:.4f} OSR²")
+            print(f"  -> stopping: dropping {worst} would cost {degradation:.4f} val_acc")
         return None, current
     if verbose:
-        print(f"  -> stopping: {worst} in soft zone but OSR² cost {degradation:.4f}")
+        print(f"  -> stopping: {worst} in soft zone but val_acc cost {degradation:.4f}")
     return None, current
 
 
@@ -168,7 +180,7 @@ def train_with_vif(
     vif_soft: float = VIF_DROP_SOFT,
     soft_osr2_tolerance: float = SOFT_OSR2_TOLERANCE,
 ) -> TrainedModel:
-    """Run the full VIF-pruned OLS training pipeline.
+    """Run the full VIF-pruned logistic regression training pipeline.
 
     Parameters
     ----------
@@ -195,7 +207,7 @@ def train_with_vif(
     y_train, y_val, y_test = train[target_col], val[target_col], test[target_col]
 
     # ---- iterative elimination ------------------------------------------------
-    state = _fit_ols(x_train, y_train, x_val, y_val)
+    state = _fit_logistic(x_train, y_train, x_val, y_val)
     vif_trace: list[dict[str, Any]] = [{
         "iter": 0, "dropped": None, "vif_max": max(state.vif.values()),
         "r2": state.r2, "osr2": state.osr2, "hit_rate": state.hit_rate,
@@ -203,7 +215,7 @@ def train_with_vif(
     }]
     if verbose:
         print(f"[iter 0] n={len(x_train.columns)} max_vif={max(state.vif.values()):.2f} "
-              f"r2={state.r2:.4f} osr2={state.osr2:.4f} hit={state.hit_rate:.4f}")
+              f"train_acc={state.r2:.4f} val_acc={state.osr2:.4f}")
 
     it = 1
     while True:
@@ -223,21 +235,42 @@ def train_with_vif(
         })
         if verbose:
             print(f"[iter {it}] dropped={dropped} remaining={len(state.features)} "
-                  f"max_vif={max(state.vif.values()):.2f} r2={state.r2:.4f} "
-                  f"osr2={state.osr2:.4f} hit={state.hit_rate:.4f}")
+                  f"max_vif={max(state.vif.values()):.2f} train_acc={state.r2:.4f} "
+                  f"val_acc={state.osr2:.4f}")
         it += 1
 
     # ---- refit on train+val, score on test ------------------------------------
     final_feats = state.features
     tv_x = pd.concat([x_train[final_feats], x_val[final_feats]])
     tv_y = pd.concat([y_train, y_val])
-    final_model = sm.OLS(tv_y, sm.add_constant(tv_x, has_constant="add")).fit()
-    y_pred_test = final_model.predict(sm.add_constant(x_test[final_feats], has_constant="add"))
-    test_metrics = full_backtest(tv_y, y_test, y_pred_test, r2_train=float(final_model.rsquared))
+    tv_y_bin = (tv_y > 0).astype(int)
+    y_test_bin = (y_test > 0).astype(int)
 
-    params = final_model.params
-    intercept = float(params.get("const", 0.0))
-    coefficients = {c: float(params[c]) for c in final_feats if c in params}
+    final_model = LogisticRegression(C=1.0, max_iter=1000, random_state=42)
+    final_model.fit(tv_x[final_feats], tv_y_bin)
+
+    y_pred_test_logodds = pd.Series(
+        final_model.decision_function(x_test[final_feats]),
+        index=y_test.index,
+    )
+    test_conf = direction_confusion(y_test, y_pred_test_logodds)
+    tv_acc = float(final_model.score(tv_x[final_feats], tv_y_bin))
+    test_acc = float(final_model.score(x_test[final_feats], y_test_bin))
+    test_loss = float(_log_loss(y_test_bin, final_model.predict_proba(x_test[final_feats])))
+
+    test_metrics = BacktestMetrics(
+        r2=tv_acc,        # train+val accuracy
+        osr2=test_acc,    # test accuracy
+        rmse=test_loss,   # test log-loss
+        hit_rate=test_conf.hit_rate,
+        tp=test_conf.tp, fp=test_conf.fp, tn=test_conf.tn, fn=test_conf.fn,
+        n=test_conf.n,
+    )
+
+    intercept = float(final_model.intercept_[0])
+    coefficients = {c: float(v) for c, v in zip(final_feats, final_model.coef_[0])}
+
+    # val metrics from the last VIF-elimination iteration state
     y_pred_val = pd.Series(
         state.intercept + x_val[final_feats].values @ [state.coefs.get(c, 0.0) for c in final_feats],
         index=y_val.index,
@@ -252,9 +285,9 @@ def train_with_vif(
 
     if verbose:
         print()
-        print(f"[FINAL] features={len(final_feats)} train_r2={test_metrics.r2:.4f} "
-              f"test_osr2={test_metrics.osr2:.4f} test_hit={test_metrics.hit_rate:.4f} "
-              f"test_rmse={test_metrics.rmse:.6f}")
+        print(f"[FINAL] features={len(final_feats)} train_acc={tv_acc:.4f} "
+              f"test_acc={test_acc:.4f} test_hit={test_conf.hit_rate:.4f} "
+              f"test_logloss={test_loss:.6f}")
 
     return TrainedModel(
         selected_features=final_feats,

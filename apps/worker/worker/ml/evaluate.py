@@ -56,15 +56,25 @@ async def evaluate_predictions(sb: Client, settings: Settings) -> None:
 
 
 async def _backfill_scores(sb: Client, settings: Settings) -> int:
-    """Mark hit/miss on predictions whose target bar has now closed."""
+    """Mark hit/miss on predictions whose target bar has now closed.
+
+    With prediction_bars_ahead=3 (15-min horizon), a prediction at time T is
+    scored against the close of the bar that ends 3 bars later. We only attempt
+    scoring once 3 bars have fully closed (pred_cutoff), and we fetch the Nth
+    candle in sequence using .range(N-1, N-1).
+    """
     now = datetime.now(tz=timezone.utc)
-    cutoff = (now - timedelta(seconds=settings.candle_granularity)).isoformat()
+    bars_ahead = settings.prediction_bars_ahead
+    # Only score predictions where bars_ahead full bars have closed since creation
+    pred_cutoff = (now - timedelta(seconds=bars_ahead * settings.candle_granularity)).isoformat()
+    # Upper bound for candle queries: only use fully-ingested bars
+    bar_cutoff = (now - timedelta(seconds=settings.candle_granularity)).isoformat()
 
     res = (
         sb.table("predictions")
         .select("id, symbol, created_at, current_price, predicted_logret")
         .is_("realized_logret", "null")
-        .lte("created_at", cutoff)
+        .lte("created_at", pred_cutoff)
         .order("created_at", desc=False)
         .limit(BATCH_SIZE)
         .execute()
@@ -76,26 +86,27 @@ async def _backfill_scores(sb: Client, settings: Settings) -> int:
     updated = 0
     for pred in pending:
         pred_time = pred["created_at"]
+        # Fetch the bars_ahead-th candle after the prediction timestamp (0-indexed → bars_ahead-1)
         bar_res = (
             sb.table("candles")
             .select("close, bucket_start")
             .eq("symbol", pred["symbol"])
             .eq("granularity", settings.candle_granularity)
             .gte("bucket_start", pred_time)
-            .lt("bucket_start", cutoff)
+            .lt("bucket_start", bar_cutoff)
             .order("bucket_start", desc=False)
-            .limit(1)
+            .range(bars_ahead - 1, bars_ahead - 1)
             .execute()
         )
         if not bar_res.data:
             continue
 
-        close_next = float(bar_res.data[0]["close"])
+        close_target = float(bar_res.data[0]["close"])
         current = float(pred["current_price"])
-        if current <= 0 or close_next <= 0:
+        if current <= 0 or close_target <= 0:
             continue
 
-        realized = math.log(close_next / current)
+        realized = math.log(close_target / current)
         predicted = float(pred["predicted_logret"])
         hit = (predicted > 0 and realized > 0) or (predicted < 0 and realized < 0)
 
