@@ -54,13 +54,17 @@ async def run() -> None:
     async def _infer_and_record() -> None:
         await infer_and_record(sb, settings)
 
-    async def _evaluate_predictions() -> None:
-        await evaluate_predictions(sb, settings)
-
     async def _refit_models() -> None:
         await refit_models(sb, settings)
 
-    async def _analyze_and_optimize() -> None:
+    async def _evaluate_then_optimize() -> None:
+        # analyze_and_optimize must read the model_performance row that
+        # evaluate_predictions just wrote.  Running them as a single chained
+        # job guarantees ordering — registering them as two independent
+        # 60-minute jobs causes analyze_and_optimize to misfire on every cycle
+        # because evaluate's synchronous supabase-py calls block the asyncio
+        # event loop past the 30s misfire_grace_time window.
+        await evaluate_predictions(sb, settings)
         await analyze_and_optimize(sb, settings)
 
     add_interval(
@@ -83,8 +87,8 @@ async def run() -> None:
     )
     add_interval(
         scheduler,
-        "evaluate_predictions",
-        _evaluate_predictions,
+        "evaluate_then_optimize",
+        _evaluate_then_optimize,
         minutes=settings.evaluate_interval_minutes,
     )
     add_interval(
@@ -92,15 +96,6 @@ async def run() -> None:
         "refit_models",
         _refit_models,
         hours=settings.refit_interval_hours,
-    )
-    # Runs after evaluate_predictions on the same 1h cadence.
-    # APScheduler fires both independently; the 60s offset between them
-    # means evaluate always finishes before optimize reads the new perf row.
-    add_interval(
-        scheduler,
-        "analyze_and_optimize",
-        _analyze_and_optimize,
-        minutes=settings.optimize_interval_minutes,
     )
 
     scheduler.start()
