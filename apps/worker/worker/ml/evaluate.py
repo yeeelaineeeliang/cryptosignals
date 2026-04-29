@@ -167,31 +167,44 @@ def _compute_trading_metrics(
     return win_rate, sharpe, max_drawdown, avg_pnl, hit_rate_traded
 
 
+_SHARPE_PAGE_SIZE = 1000
+
+
 def _compute_sharpe_live(sb: Client, model_id: int) -> float | None:
     """Sharpe over up to 30 days of LONG/SHORT predictions for model_id.
 
     Queried separately from the 24h eval window so the sample size is large
     enough that the annualization factor doesn't amplify noise into ±100 swings.
     Uses all available predictions when the model is newer than 30 days.
+    Paginates in chunks to avoid the PostgREST default 1000-row cap.
     """
     cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=_SHARPE_LOOKBACK_DAYS)).isoformat()
-    res = (
-        sb.table("predictions")
-        .select("realized_logret, signal")
-        .eq("model_version_id", model_id)
-        .gte("created_at", cutoff)
-        .in_("signal", ["LONG", "SHORT"])
-        .not_.is_("realized_logret", "null")
-        .order("created_at", desc=False)
-        .execute()
-    )
-    rows = res.data or []
-    if len(rows) < 2:
+    all_rows: list[dict] = []
+    offset = 0
+    while True:
+        res = (
+            sb.table("predictions")
+            .select("realized_logret, signal")
+            .eq("model_version_id", model_id)
+            .gte("created_at", cutoff)
+            .in_("signal", ["LONG", "SHORT"])
+            .not_.is_("realized_logret", "null")
+            .order("created_at", desc=False)
+            .range(offset, offset + _SHARPE_PAGE_SIZE - 1)
+            .execute()
+        )
+        batch = res.data or []
+        all_rows.extend(batch)
+        if len(batch) < _SHARPE_PAGE_SIZE:
+            break
+        offset += _SHARPE_PAGE_SIZE
+
+    if len(all_rows) < 2:
         return None
 
     pnls = [
         float(r["realized_logret"]) if r["signal"] == "LONG" else -float(r["realized_logret"])
-        for r in rows
+        for r in all_rows
     ]
     avg = sum(pnls) / len(pnls)
     std = statistics.stdev(pnls)

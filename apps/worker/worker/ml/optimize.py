@@ -183,8 +183,14 @@ def _confirm_pending(sb: Client) -> None:
         after_val = _safe_float(metric_after.get(expected_metric)) or 0.0
         actual_delta = after_val - before_val
 
-        # Confirmed if actual change reached at least 50% of the expected magnitude.
-        confirmed = actual_delta >= expected_delta * 0.5
+        # Confirmed if the change moved at least 50% as far as expected, in the
+        # right direction.  expected_delta can be negative (e.g. feature_drift_pct
+        # should decrease), so we normalise by the ratio instead of using >= which
+        # is directionally wrong for negative targets.
+        if expected_delta != 0:
+            confirmed = (actual_delta / expected_delta) >= 0.5
+        else:
+            confirmed = actual_delta >= 0
 
         sb.table("optimization_history").update({
             "confirmed": confirmed,
