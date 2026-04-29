@@ -42,6 +42,11 @@ MIN_SAMPLE_FOR_PERF = 5
 # Crypto trades 24/7/365. 5-min bars: 12/h × 24h × 365d = 105,120 bars/year.
 _ANNUALIZATION = math.sqrt(105_120)
 
+# Sharpe uses a longer lookback to avoid sample-size artifacts from the hourly
+# eval window.  24h of trades (~20–40 signals) multiplied by sqrt(105_120)≈324
+# produces ±50–100 Sharpe swings from one eval to the next that are pure noise.
+_SHARPE_LOOKBACK_DAYS = 30
+
 
 async def evaluate_predictions(sb: Client, settings: Settings) -> None:
     """Top-level job: score unscored predictions, then write rolling perf."""
@@ -160,6 +165,37 @@ def _compute_trading_metrics(
     hit_rate_traded = correct / len(traded)
 
     return win_rate, sharpe, max_drawdown, avg_pnl, hit_rate_traded
+
+
+def _compute_sharpe_live(sb: Client, model_id: int) -> float | None:
+    """Sharpe over up to 30 days of LONG/SHORT predictions for model_id.
+
+    Queried separately from the 24h eval window so the sample size is large
+    enough that the annualization factor doesn't amplify noise into ±100 swings.
+    Uses all available predictions when the model is newer than 30 days.
+    """
+    cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=_SHARPE_LOOKBACK_DAYS)).isoformat()
+    res = (
+        sb.table("predictions")
+        .select("realized_logret, signal")
+        .eq("model_version_id", model_id)
+        .gte("created_at", cutoff)
+        .in_("signal", ["LONG", "SHORT"])
+        .not_.is_("realized_logret", "null")
+        .order("created_at", desc=False)
+        .execute()
+    )
+    rows = res.data or []
+    if len(rows) < 2:
+        return None
+
+    pnls = [
+        float(r["realized_logret"]) if r["signal"] == "LONG" else -float(r["realized_logret"])
+        for r in rows
+    ]
+    avg = sum(pnls) / len(pnls)
+    std = statistics.stdev(pnls)
+    return (avg / std) * _ANNUALIZATION if std > 0 else 0.0
 
 
 def _compute_feature_drift(
@@ -296,8 +332,15 @@ async def _write_performance(sb: Client, symbol: str, settings: Settings) -> Non
     hit_rate = (tp + tn) / n if n else None
 
     # --- new trading-quality metrics ---
-    win_rate, sharpe, max_drawdown, avg_pnl, _ = _compute_trading_metrics(scored)
+    # win_rate / drawdown / avg_pnl: 24h window (reflects recent regime)
+    # sharpe_live: 30-day rolling window (24h sample is too small — annualizing
+    #              ~20–40 trades by sqrt(105_120) causes ±100 swings from noise)
+    win_rate, _, max_drawdown, avg_pnl, _ = _compute_trading_metrics(scored)
+    sharpe = _compute_sharpe_live(sb, model_id)
     feature_drift_pct = _compute_feature_drift(sb, model_id, symbol, settings.candle_granularity)
+    # NUMERIC(6,4) can hold at most 99.9999; clamp before insert
+    if feature_drift_pct is not None:
+        feature_drift_pct = min(feature_drift_pct, 99.0)
 
     # --- prior snapshot for trend annotation in diagnosis ---
     prior_res = (

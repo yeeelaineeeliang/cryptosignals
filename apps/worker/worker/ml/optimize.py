@@ -60,6 +60,23 @@ def _latest_perf(sb: Client, model_id: int) -> dict[str, Any] | None:
     return res.data[0] if res.data else None
 
 
+def _first_perf_after(sb: Client, model_id: int, after_ts: str) -> dict[str, Any] | None:
+    """Return the earliest model_performance row for model_id with evaluated_at > after_ts."""
+    res = (
+        sb.table("model_performance")
+        .select(
+            "id, hit_rate, win_rate, sharpe_live, max_drawdown, "
+            "avg_pnl_per_trade, feature_drift_pct, evaluated_at"
+        )
+        .eq("model_version_id", model_id)
+        .gt("evaluated_at", after_ts)
+        .order("evaluated_at", desc=False)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
 def _record_plan(
     sb: Client,
     plan: OptimizationPlan,
@@ -115,17 +132,46 @@ def _confirm_pending(sb: Client) -> None:
     """Resolve any optimization_history rows where confirmed IS NULL."""
     res = (
         sb.table("optimization_history")
-        .select("run_id, plan, metric_before")
+        .select("run_id, symbol, model_version_id, plan, metric_before, timestamp")
         .is_("confirmed", "null")
         .execute()
     )
     for row in (res.data or []):
         plan_dict: dict = row["plan"]
-        new_model_id = plan_dict.get("new_model_version_id")
-        if not new_model_id:
-            continue  # refit may not have run yet or produced no new model
+        symbol: str = row["symbol"]
+        change_type: str = plan_dict.get("change_type", "")
+        old_model_id: int = int(row["model_version_id"])
+        plan_ts: str = row["timestamp"]
 
-        metric_after = _latest_perf(sb, int(new_model_id))
+        # Determine which model to score against.
+        # Refit-based changes record new_model_version_id in the plan JSONB when
+        # _apply_plan succeeds.  If it's absent (refit returned no improvement, or
+        # a signal_threshold change that never triggers a refit), fall back:
+        #   - signal_threshold: score the same model — the threshold is advisory and
+        #     takes effect immediately in inference without changing the model.
+        #   - all other refit types where recording failed: use the current active
+        #     model for the symbol, which may have been promoted by a later refit.
+        recorded_new = plan_dict.get("new_model_version_id")
+        if recorded_new:
+            target_model_id = int(recorded_new)
+        elif change_type == "signal_threshold":
+            target_model_id = old_model_id
+        else:
+            active_res = (
+                sb.table("model_versions")
+                .select("id")
+                .eq("symbol", symbol)
+                .eq("is_active", True)
+                .maybe_single()
+                .execute()
+            )
+            if not active_res or not active_res.data:
+                continue
+            target_model_id = int(active_res.data["id"])
+
+        # Use the first eval AFTER the plan was written so we are measuring the
+        # post-change state, not a pre-change snapshot.
+        metric_after = _first_perf_after(sb, target_model_id, plan_ts)
         if metric_after is None:
             continue  # not evaluated yet; check again next tick
 
@@ -137,7 +183,7 @@ def _confirm_pending(sb: Client) -> None:
         after_val = _safe_float(metric_after.get(expected_metric)) or 0.0
         actual_delta = after_val - before_val
 
-        # Confirmed if we achieved at least 50% of the expected improvement
+        # Confirmed if actual change reached at least 50% of the expected magnitude.
         confirmed = actual_delta >= expected_delta * 0.5
 
         sb.table("optimization_history").update({
@@ -149,6 +195,9 @@ def _confirm_pending(sb: Client) -> None:
             "optimize_confirmed",
             run_id=row["run_id"],
             confirmed=confirmed,
+            symbol=symbol,
+            change_type=change_type,
+            target_model_id=target_model_id,
             expected_metric=expected_metric,
             expected_delta=expected_delta,
             actual_delta=round(actual_delta, 5),
