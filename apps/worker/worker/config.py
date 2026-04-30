@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     # Prediction horizon (bars ahead the model targets)
     prediction_bars_ahead: int = 3        # 3 × 5min = 15-min cumulative return
 
+    # VIF elimination tuning
+    # Widened from 0.005 → 0.01 to prevent soft-zone boundary features
+    # (f_momentum_10, f_rsi_14) from flipping in/out across 30-day windows.
+    # See CLAUDE.md § VIF tuning for the full rationale.
+    soft_osr2_tolerance: float = 0.01
+    vif_hard_threshold: float = 10.0  # override with VIF_HARD_THRESHOLD env var
+
     # Optimization loop
     optimize_interval_minutes: int = 60   # runs after every evaluate cycle
 

@@ -52,6 +52,7 @@ _SIGNAL_THRESHOLD_RAISED = 0.005
 
 _HISTORY_WINDOW = 10           # how many recent perf rows to read
 _REFIT_COOLDOWN = 3            # consecutive failed refit_now before escalating to lookback_window
+_VIF_COOLDOWN = 3              # consecutive failed vif_threshold before escalating to refit_now
 
 
 @dataclass(slots=True)
@@ -100,6 +101,22 @@ def _refit_on_cooldown(recent_plans: list[dict]) -> bool:
     window = recent_plans[:_REFIT_COOLDOWN]
     return (
         all(p.get("change_type") == "refit_now" for p in window)
+        and not any(p.get("confirmed") is True for p in window)
+        and any(p.get("confirmed") is False for p in window)
+    )
+
+
+def _vif_on_cooldown(recent_plans: list[dict]) -> bool:
+    """True when the last _VIF_COOLDOWN plans are all vif_threshold with no confirmed success.
+
+    Same semantics as _refit_on_cooldown: requires at least one confirmed=False so a
+    brand-new deployment doesn't skip straight to the escalation path.
+    """
+    if len(recent_plans) < _VIF_COOLDOWN:
+        return False
+    window = recent_plans[:_VIF_COOLDOWN]
+    return (
+        all(p.get("change_type") == "vif_threshold" for p in window)
         and not any(p.get("confirmed") is True for p in window)
         and any(p.get("confirmed") is False for p in window)
     )
@@ -269,6 +286,21 @@ def _rule_based_plan(
     # Rule 3 — high feature coefficient drift
     recent_drift = next((d for d in drifts if d is not None), None)
     if recent_drift is not None and recent_drift > _DRIFT_TRIGGER:
+        if _vif_on_cooldown(recent_plans):
+            return OptimizationPlan(
+                symbol=symbol,
+                change_type="refit_now",
+                parameter="rolling_train_days",
+                old_value=_LOOKBACK_DEFAULT,
+                new_value=_LOOKBACK_DEFAULT,
+                hypothesis=(
+                    f"vif_threshold advisory issued {_VIF_COOLDOWN} consecutive times without "
+                    f"confirmed feature_drift_pct reduction. Triggering refit to apply the "
+                    "tightened VIF setting against the current feature set."
+                ),
+                expected_metric="feature_drift_pct",
+                expected_delta=-0.15,
+            )
         return OptimizationPlan(
             symbol=symbol,
             change_type="vif_threshold",

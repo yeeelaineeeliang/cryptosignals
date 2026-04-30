@@ -80,9 +80,9 @@ async def refit_one(
     """Refit a single symbol. Returns the new model_version id, or None if skipped."""
     overrides = overrides or {}
     days = int(overrides.get("lookback_days", settings.rolling_train_days))
-    vif_hard = float(overrides.get("vif_hard", VIF_DROP_HARD))
+    vif_hard = float(overrides.get("vif_hard", settings.vif_hard_threshold))
     vif_soft = float(overrides.get("vif_soft", VIF_DROP_SOFT))
-    soft_osr2_tol = float(overrides.get("soft_osr2_tolerance", SOFT_OSR2_TOLERANCE))
+    soft_osr2_tol = float(overrides.get("soft_osr2_tolerance", settings.soft_osr2_tolerance))
 
     candles = _load_rolling_candles(sb, symbol, settings.candle_granularity, days)
     if candles.empty or len(candles) < MIN_CLEAN_ROWS:
@@ -125,6 +125,8 @@ async def refit_one(
             symbol=symbol,
             new_osr2=round(model.metrics.osr2, 4),
             current_osr2=round(float(current_model["osr2"]), 4) if current_model else None,
+            selected_features=model.selected_features,
+            n_features=len(model.selected_features),
         )
         return None
 
@@ -145,11 +147,36 @@ async def refit_one(
     if hypothesis:
         sb.table("model_versions").update({"hypothesis": hypothesis}).eq("id", model_id).execute()
 
+    # VIF drop sequence: compact list of {iter, dropped, vif_at_drop, osr2_after}
+    vif_drops = [
+        {
+            "iter": e["iter"],
+            "dropped": e["dropped"],
+            "vif": round(e["vif_max"], 2),
+            "osr2": round(e["osr2"], 4),
+        }
+        for e in model.vif_trace
+        if e["dropped"] is not None
+    ]
+
+    # Feature set diff vs the prior active model
+    prior_features: set[str] = set(current_model["selected_features"]) if current_model else set()
+    new_features: set[str] = set(model.selected_features)
+    features_added = sorted(new_features - prior_features)
+    features_removed = sorted(prior_features - new_features)
+
     log.info(
         "refit_complete",
         symbol=symbol,
         model_id=model_id,
-        features=len(model.selected_features),
+        selected_features=model.selected_features,
+        n_features=len(model.selected_features),
+        n_vif_drops=len(vif_drops),
+        vif_drops=vif_drops,
+        feature_set_changed=bool(features_added or features_removed),
+        features_added=features_added,
+        features_removed=features_removed,
+        final_vif_max=round(model.vif_trace[-1]["vif_max"], 2),
         r2=round(model.metrics.r2, 4),
         osr2=round(model.metrics.osr2, 4),
         hit_rate=round(model.metrics.hit_rate, 4),

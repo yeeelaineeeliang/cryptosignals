@@ -34,7 +34,7 @@ from .metrics import BacktestMetrics, direction_confusion
 
 VIF_DROP_HARD = 10.0
 VIF_DROP_SOFT = 5.0
-SOFT_OSR2_TOLERANCE = 0.005   # max val-accuracy drop allowed in the soft zone
+SOFT_OSR2_TOLERANCE = 0.01    # max val-accuracy drop allowed in the soft zone
 HARD_OSR2_TOLERANCE = 0.01    # hard stop: costs more than this → don't drop
 MIN_FEATURES = 3
 
