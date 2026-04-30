@@ -51,6 +51,7 @@ _SIGNAL_THRESHOLD_DEFAULT = 0.002
 _SIGNAL_THRESHOLD_RAISED = 0.005
 
 _HISTORY_WINDOW = 10           # how many recent perf rows to read
+_REFIT_COOLDOWN = 3            # consecutive failed refit_now before escalating to lookback_window
 
 
 @dataclass(slots=True)
@@ -73,6 +74,55 @@ def _safe_float(val: Any) -> float | None:
         return float(val) if val is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _last_n_plans(sb: Client, symbol: str, n: int) -> list[dict]:
+    """Return the n most recent optimization_history rows for symbol, newest first."""
+    res = (
+        sb.table("optimization_history")
+        .select("change_type, confirmed, plan")
+        .eq("symbol", symbol)
+        .order("timestamp", desc=True)
+        .limit(n)
+        .execute()
+    )
+    return res.data or []
+
+
+def _refit_on_cooldown(recent_plans: list[dict]) -> bool:
+    """True when the last _REFIT_COOLDOWN plans are all refit_now with no confirmed success.
+
+    Requires at least one confirmed=False (not just pending nulls) so a brand-new
+    deployment doesn't immediately skip to the escalation path.
+    """
+    if len(recent_plans) < _REFIT_COOLDOWN:
+        return False
+    window = recent_plans[:_REFIT_COOLDOWN]
+    return (
+        all(p.get("change_type") == "refit_now" for p in window)
+        and not any(p.get("confirmed") is True for p in window)
+        and any(p.get("confirmed") is False for p in window)
+    )
+
+
+def _advisory_already_issued(
+    recent_plans: list[dict], change_type: str, new_value: object
+) -> bool:
+    """True if the most recent plan is the same advisory and was not confirmed.
+
+    Blocks re-issue when confirmed=False (tried, didn't work) OR confirmed=None
+    (still pending — the threshold is advisory and won't change win_rate until
+    enough new trades accumulate, so waiting one more cycle is not useful).
+    """
+    if not recent_plans:
+        return False
+    last = recent_plans[0]
+    plan_dict = last.get("plan") or {}
+    return (
+        last.get("change_type") == change_type
+        and plan_dict.get("new_value") == new_value
+        and last.get("confirmed") is not True
+    )
 
 
 def _recent_perf(sb: Client, model_id: int, n: int) -> list[dict]:
@@ -135,6 +185,7 @@ def _rule_based_plan(
     perf_rows: list[dict],
     current_model: dict,
     prior_model: dict | None,
+    recent_plans: list[dict],
 ) -> OptimizationPlan | None:
     """Apply priority-ordered rules. Return the first matching plan, or None."""
     if not perf_rows:
@@ -148,6 +199,23 @@ def _rule_based_plan(
     # Rule 1 — sustained low hit rate
     valid_hits = [h for h in hit_rates[:_LOW_HIT_RUNS] if h is not None]
     if len(valid_hits) >= _LOW_HIT_RUNS and all(h < _LOW_HIT_THRESHOLD for h in valid_hits):
+        if _advisory_already_issued(recent_plans, "signal_threshold", _SIGNAL_THRESHOLD_RAISED):
+            # Advisory was issued last cycle (confirmed=False or still pending) and
+            # win_rate hasn't improved — escalate to a refit instead of repeating.
+            return OptimizationPlan(
+                symbol=symbol,
+                change_type="refit_now",
+                parameter="rolling_train_days",
+                old_value=_LOOKBACK_DEFAULT,
+                new_value=_LOOKBACK_DEFAULT,
+                hypothesis=(
+                    f"signal_threshold={_SIGNAL_THRESHOLD_RAISED} advisory issued last cycle "
+                    f"with no win_rate improvement. Escalating to refit to address structural "
+                    "underperformance."
+                ),
+                expected_metric="win_rate",
+                expected_delta=0.04,
+            )
         return OptimizationPlan(
             symbol=symbol,
             change_type="signal_threshold",
@@ -166,6 +234,23 @@ def _rule_based_plan(
     # Rule 2 — consecutive negative Sharpe
     valid_sharpes = [s for s in sharpes[:_NEG_SHARPE_RUNS] if s is not None]
     if len(valid_sharpes) >= _NEG_SHARPE_RUNS and all(s < 0 for s in valid_sharpes):
+        if _refit_on_cooldown(recent_plans):
+            # refit_now triggered _REFIT_COOLDOWN times in a row without a confirmed
+            # Sharpe improvement — escalate to a shorter lookback window.
+            return OptimizationPlan(
+                symbol=symbol,
+                change_type="lookback_window",
+                parameter="lookback_days",
+                old_value=_LOOKBACK_DEFAULT,
+                new_value=_LOOKBACK_SHORTENED,
+                hypothesis=(
+                    f"refit_now attempted {_REFIT_COOLDOWN} consecutive times without confirmed "
+                    f"Sharpe improvement. Escalating to {_LOOKBACK_SHORTENED}-day lookback to "
+                    "adapt to the current market regime."
+                ),
+                expected_metric="sharpe_live",
+                expected_delta=0.30,
+            )
         return OptimizationPlan(
             symbol=symbol,
             change_type="refit_now",
@@ -224,6 +309,20 @@ def _rule_based_plan(
     # Rule 5 — sustained negative average PnL per trade
     valid_pnls = [p for p in avg_pnls[:_NEG_PNL_RUNS] if p is not None]
     if len(valid_pnls) >= _NEG_PNL_RUNS and all(p < 0 for p in valid_pnls):
+        if _advisory_already_issued(recent_plans, "signal_threshold", _SIGNAL_THRESHOLD_RAISED):
+            return OptimizationPlan(
+                symbol=symbol,
+                change_type="refit_now",
+                parameter="rolling_train_days",
+                old_value=_LOOKBACK_DEFAULT,
+                new_value=_LOOKBACK_DEFAULT,
+                hypothesis=(
+                    f"signal_threshold={_SIGNAL_THRESHOLD_RAISED} advisory issued last cycle "
+                    f"with no avg_pnl improvement. Escalating to refit."
+                ),
+                expected_metric="avg_pnl_per_trade",
+                expected_delta=0.0002,
+            )
         return OptimizationPlan(
             symbol=symbol,
             change_type="signal_threshold",
@@ -312,7 +411,8 @@ def analyze_model(
         return None  # caller handles the warning
 
     prior = _prior_model(sb, symbol, settings.candle_granularity)
-    plan = _rule_based_plan(symbol, perf_rows, current, prior)
+    recent_plans = _last_n_plans(sb, symbol, _REFIT_COOLDOWN)
+    plan = _rule_based_plan(symbol, perf_rows, current, prior, recent_plans)
 
     if plan is None:
         return None
